@@ -1,58 +1,74 @@
-from fastapi import FastAPI
-from pydantic import BaseModel
-from transformers import AutoTokenizer, AutoModelForSequenceClassification
-import torch
-import numpy as np
-
-app = FastAPI()
-
-# FinBERTモデルのロード（金融テキストに最適化されたBERT）
-tokenizer = AutoTokenizer.from_pretrained("ProsusAI/finbert")
-model = AutoModelForSequenceClassification.from_pretrained("ProsusAI/finbert")
-
-class SentimentRequest(BaseModel):
-    text: str
-    source_type: str  # 'central_bank', 'politician', 'news'
-    impact_level: str # 'high', 'medium', 'low'
-
-def calculate_fsi(text):
-    # 1. センチメント分析
-    inputs = tokenizer(text, return_tensors="pt", padding=True, truncation=True, max_length=512)
-    outputs = model(**inputs)
-    prediction = torch.nn.functional.softmax(outputs.logits, dim=-1)
-    
-    # FinBERT output: [positive, negative, neutral]
-    probs = prediction.detach().numpy()[0]
-    pos, neg, neu = probs[0], probs[1], probs[2]
-    
-    # 0-100のスコアに変換 (50が中立)
-    # スコア = (ポジティブ確率 * 100 * 0.5) + (50) - (ネガティブ確率 * 100 * 0.5)
-    base_score = 50 + (pos * 50) - (neg * 50)
-    return int(base_score), float(pos), float(neg)
-
-@app.post("/analyze")
-async def analyze_sentiment(req: SentimentRequest):
-    score, bullish_p, bearish_p = calculate_fsi(req.text)
-    
-    # 重み付け設定
-    weights = {"central_bank": 3, "politician": 2, "news": 1}
-    impacts = {"high": 1.5, "medium": 1.0, "low": 0.5}
-    
-    weight = weights.get(req.source_type, 1)
-    impact = impacts.get(req.impact_level, 1.0)
-    
-    # 最終的な重み付きスコア（単一入力の場合）
-    final_score = score 
-    
-    return {
-        "fsi_score": final_score,
-        "interpretation": "Bullish" if final_score > 60 else "Bearish" if final_score < 40 else "Neutral",
-        "bullish_probability": round(bullish_p * 100, 2),
-        "bearish_probability": round(bearish_p * 100, 2),
-        "weight_applied": weight,
-        "impact": req.impact_level
-    }
-
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <title>FSI - Fundamental Sentiment Index</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        .gauge-container { position: relative; width: 300px; margin: 0 auto; }
+        .needle {
+            position: absolute; width: 4px; height: 100px;
+            background: #374151; bottom: 20px; left: 50%;
+            transform-origin: bottom center; transition: transform 1.5s cubic-bezier(0.17, 0.67, 0.83, 0.67);
+        }
+    </style>
+</head>
+<body class="bg-gray-900 text-gray-100">
+    <header class="border-b border-gray-800 p-6 flex justify-between items-center">
+        <h1 class="text-2xl font-bold text-blue-400">FSI <span class="text-white text-sm font-normal">USD/JPY</span></h1>
+        <input type="password" id="apiKey" placeholder="OpenAI API Keyを入力" class="bg-gray-800 text-xs p-2 rounded border border-gray-700 w-48">
+    </header>
+    <main class="max-w-4xl mx-auto p-6">
+        <section class="bg-gray-800 rounded-2xl p-8 mb-8 text-center shadow-2xl">
+            <div class="gauge-container mb-4">
+                <canvas id="gaugeChart"></canvas>
+                <div id="needle" class="needle" style="transform: rotate(-90deg);"></div>
+            </div>
+            <div class="text-5xl font-black mb-2" id="scoreDisplay">50</div>
+            <div id="statusDisplay" class="text-xl font-bold text-gray-400 uppercase">Neutral</div>
+        </section>
+        <section class="grid grid-cols-1 md:grid-cols-2 gap-6">
+            <div class="bg-gray-800 p-6 rounded-xl border border-gray-700">
+                <textarea id="newsInput" rows="6" class="w-full bg-gray-900 border border-gray-700 rounded-lg p-4 text-sm" placeholder="ニュースを貼り付け..."></textarea>
+                <button onclick="analyzeSentiment()" class="w-full mt-4 bg-blue-600 hover:bg-blue-500 py-2 rounded font-bold">分析実行</button>
+            </div>
+            <div class="bg-gray-800 p-6 rounded-xl border border-gray-700">
+                <div class="flex justify-between text-xs mb-1"><span>Bullish</span><span id="bullProb">0%</span></div>
+                <div class="w-full bg-gray-700 h-2 rounded-full mb-4"><div id="bullBar" class="bg-blue-500 h-2 rounded-full" style="width: 0%"></div></div>
+                <div class="flex justify-between text-xs mb-1"><span>Bearish</span><span id="bearProb">0%</span></div>
+                <div class="w-full bg-gray-700 h-2 rounded-full"><div id="bearBar" class="bg-red-500 h-2 rounded-full" style="width: 0%"></div></div>
+            </div>
+        </section>
+    </main>
+    <script>
+        const ctx = document.getElementById('gaugeChart').getContext('2d');
+        const gaugeChart = new Chart(ctx, {
+            type: 'doughnut',
+            data: { datasets: [{ data: [20, 20, 20, 20, 20], backgroundColor: ['#ef4444', '#f87171', '#9ca3af', '#60a5fa', '#3b82f6'], borderWidth: 0, circumference: 180, rotation: 270 }] },
+            options: { cutout: '80%', plugins: { tooltip: { enabled: false } } }
+        });
+        async function analyzeSentiment() {
+            const apiKey = document.getElementById('apiKey').value;
+            const text = document.getElementById('newsInput').value;
+            if (!apiKey || !text) return alert("API Keyとテキストを入力してください");
+            const prompt = `Analyze this text for USD/JPY sentiment. Text: "${text}". Output JSON: {score: 0-100, bullish_p: 0-1, bearish_p: 0-1}`;
+            try {
+                const res = await fetch('https://api.openai.com/v1/chat/completions', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
+                    body: JSON.stringify({ model: "gpt-3.5-turbo", messages: [{role: "system", content: "You are a Quant. Output JSON only."}, {role: "user", content: prompt}], response_format: { type: "json_object" } })
+                });
+                const data = await res.json();
+                const r = JSON.parse(data.choices[0].message.content);
+                document.getElementById('scoreDisplay').innerText = r.score;
+                document.getElementById('needle').style.transform = `rotate(${(r.score / 100) * 180 - 90}deg)`;
+                document.getElementById('bullProb').innerText = (r.bullish_p * 100).toFixed(1) + "%";
+                document.getElementById('bullBar').style.width = (r.bullish_p * 100) + "%";
+                document.getElementById('bearProb').innerText = (r.bearish_p * 100).toFixed(1) + "%";
+                document.getElementById('bearBar').style.width = (r.bearish_p * 100) + "%";
+            } catch (e) { alert("エラーが発生しました"); }
+        }
+    </script>
+</body>
+</html>
